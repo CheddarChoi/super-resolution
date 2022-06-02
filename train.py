@@ -230,12 +230,12 @@ class SrganTrainer:
         hr_features = self.vgg(hr) / 12.75
         return self.mean_squared_error(hr_features, sr_features)
     
-    # @tf.function
+    @tf.function
     def _content_loss_MSE(self, hr, sr, n, verbose = False):
         content_loss = self._content_loss(hr, sr)
         pixelwise_loss = self._pixelwise_loss(hr, sr)
-        if verbose:
-            print(f'[_content_loss_MSE] content loss = {content_loss.numpy():.4f}, pixel-wise loss = {pixelwise_loss.numpy():.4f}')
+        # if verbose:
+        #     print(f'[_content_loss_MSE] content loss = {content_loss.numpy():.4f}, pixel-wise loss = {pixelwise_loss.numpy():.4f}')
         return content_loss + ( pixelwise_loss / n )
     
     # @tf.function
@@ -260,8 +260,8 @@ class SrganTrainer:
 
         content_loss = self._content_loss(hr, sr)
         pixelwise_loss = self._weighted_pixelwise_loss(hr, sr, weight)
-        if verbose:
-            print(f'[_content_loss_WMSE] content loss = {content_loss.numpy():.4f}, pixel-wise loss = {pixelwise_loss:.4f}')
+        # if verbose:
+        #     print(f'[_content_loss_WMSE] content loss = {content_loss.numpy():.4f}, pixel-wise loss = {pixelwise_loss:.4f}')
         return content_loss + ( pixelwise_loss / n )
 
     def _generator_loss(self, sr_out):
