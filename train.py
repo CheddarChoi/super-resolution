@@ -1,5 +1,6 @@
 import time
 import tensorflow as tf
+import pywt
 
 from model import evaluate
 from model import srgan
@@ -11,6 +12,7 @@ from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.metrics import Mean
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.optimizers.schedules import PiecewiseConstantDecay
+import numpy as np
 
 
 class Trainer:
@@ -71,7 +73,7 @@ class Trainer:
 
                 self.now = time.perf_counter()
 
-    @tf.function
+    # @tf.function
     def train_step(self, lr, hr):
         with tf.GradientTape() as tape:
             lr = tf.cast(lr, tf.float32)
@@ -135,7 +137,9 @@ class SrganTrainer:
                  generator,
                  discriminator,
                  content_loss='VGG54',
-                 learning_rate=PiecewiseConstantDecay(boundaries=[100000], values=[1e-4, 1e-5])):
+                 learning_rate=PiecewiseConstantDecay(boundaries=[100000], values=[1e-4, 1e-5]),
+                 new_loss = 'None',
+                 loss_n = 0):
 
         if content_loss == 'VGG22':
             self.vgg = srgan.vgg_22()
@@ -149,6 +153,8 @@ class SrganTrainer:
         self.discriminator = discriminator
         self.generator_optimizer = Adam(learning_rate=learning_rate)
         self.discriminator_optimizer = Adam(learning_rate=learning_rate)
+        self.new_loss = new_loss
+        self.loss_n = loss_n
 
         self.binary_cross_entropy = BinaryCrossentropy(from_logits=False)
         self.mean_squared_error = MeanSquaredError()
@@ -161,7 +167,7 @@ class SrganTrainer:
         for lr, hr in train_dataset.take(steps):
             step += 1
 
-            pl, dl = self.train_step(lr, hr)
+            pl, dl = self.train_step(lr, hr, verbose = (step % 50 == 0))
             pls_metric(pl)
             dls_metric(dl)
 
@@ -170,8 +176,8 @@ class SrganTrainer:
                 pls_metric.reset_states()
                 dls_metric.reset_states()
 
-    @tf.function
-    def train_step(self, lr, hr):
+    # @tf.function
+    def train_step(self, lr, hr, verbose = False):
         with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
             lr = tf.cast(lr, tf.float32)
             hr = tf.cast(hr, tf.float32)
@@ -181,7 +187,12 @@ class SrganTrainer:
             hr_output = self.discriminator(hr, training=True)
             sr_output = self.discriminator(sr, training=True)
 
-            con_loss = self._content_loss(hr, sr)
+            if self.new_loss == 'MSE':
+                con_loss = self._content_loss_MSE(hr, sr, self.loss_n, verbose)
+            elif self.new_loss == 'W-MSE':
+                con_loss = self._content_loss_WMSE(hr, sr, self.loss_n, verbose)
+            else:
+                con_loss = self._content_loss(hr, sr)
             gen_loss = self._generator_loss(sr_output)
             perc_loss = con_loss + 0.001 * gen_loss
             disc_loss = self._discriminator_loss(hr_output, sr_output)
@@ -194,6 +205,23 @@ class SrganTrainer:
 
         return perc_loss, disc_loss
 
+    def _pixelwise_loss(self, hr, sr):
+        assert len(hr.shape) == 4
+
+        batch_size, w, h, c = hr.shape
+
+        err = self.mean_squared_error(hr, sr) / float(w * h)
+        return err
+        
+    def _weighted_pixelwise_loss(self, hr, sr, weight):
+        assert weight.shape == hr.shape
+        assert len(hr.shape) == 4
+
+        batch_size, w, h, c = hr.shape
+
+        err = np.mean(np.square(np.subtract(hr,sr)) * weight) / float(w * h)
+        return err
+
     @tf.function
     def _content_loss(self, hr, sr):
         sr = preprocess_input(sr)
@@ -201,6 +229,40 @@ class SrganTrainer:
         sr_features = self.vgg(sr) / 12.75
         hr_features = self.vgg(hr) / 12.75
         return self.mean_squared_error(hr_features, sr_features)
+    
+    # @tf.function
+    def _content_loss_MSE(self, hr, sr, n, verbose = False):
+        content_loss = self._content_loss(hr, sr)
+        pixelwise_loss = self._pixelwise_loss(hr, sr)
+        if verbose:
+            print(f'[_content_loss_MSE] content loss = {content_loss.numpy():.4f}, pixel-wise loss = {pixelwise_loss.numpy():.4f}')
+        return content_loss + ( pixelwise_loss / n )
+    
+    # @tf.function
+    def _content_loss_WMSE(self, hr, sr, n, verbose = False):
+        assert len(hr.shape) == 4
+
+        batch_size, w, h, c = hr.shape
+
+        weight_list = []
+        for batch in range(batch_size):
+            hr_single = hr[batch]
+            coeffs = []
+            for i in range(c):  
+                hr_one_channel = tf.cast(hr_single[:,:,i], tf.float32) / 255
+                hr_one_channel = hr_single[:,:,i].numpy() / 255
+                swt_coeff = pywt.swt2(hr_one_channel, 'bior1.3', level = 1)
+                LL, _ = swt_coeff[0]
+                coeffs.append(LL)
+            weight_list.append(np.stack(coeffs, axis=2))
+        
+        weight = np.stack(weight_list, axis=0)
+
+        content_loss = self._content_loss(hr, sr)
+        pixelwise_loss = self._weighted_pixelwise_loss(hr, sr, weight)
+        if verbose:
+            print(f'[_content_loss_WMSE] content loss = {content_loss.numpy():.4f}, pixel-wise loss = {pixelwise_loss:.4f}')
+        return content_loss + ( pixelwise_loss / n )
 
     def _generator_loss(self, sr_out):
         return self.binary_cross_entropy(tf.ones_like(sr_out), sr_out)
